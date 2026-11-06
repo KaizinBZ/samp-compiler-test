@@ -17,37 +17,83 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
-      - name: Baixar e extrair source
+      - name: Extrair source
+        env:
+          URL: ${{ inputs.source_url }}
+          PW: ${{ inputs.password }}
         run: |
+          set -o pipefail
           mkdir -p /tmp/src && cd /tmp/src
-          curl -L --retry 3 --max-time 300 -o source.bin "${{ inputs.source_url }}"
-          ls -lh source.bin
-          PW="${{ inputs.password }}"
-          if [ -n "$PW" ]; then
-            unzip -P "$PW" -o source.bin -d . >/dev/null 2>&1 \
-              || 7z x -p"$PW" -y source.bin >/dev/null \
-              || { echo "::error::Falha ao extrair (senha incorreta?)"; exit 1; }
-          else
-            unzip -o source.bin -d . >/dev/null 2>&1 \
-              || 7z x -y source.bin >/dev/null \
-              || tar -xf source.bin
-          fi
-          echo "--- conteudo ---"; ls -la
+          sudo apt-get -qq update >/dev/null 2>&1 || true
+          sudo apt-get -qq install -y p7zip-full unrar-free >/dev/null 2>&1 || true
 
-      - name: Localizar projeto Android
+          echo "URL recebida: $URL"
+
+          if echo "$URL" | grep -qi 'drive.google.com'; then
+            pip install -q --no-input gdown
+            gdown --fuzzy "$URL" -O source.bin || gdown "$URL" -O source.bin
+          elif echo "$URL" | grep -qi 'mediafire.com'; then
+            PAGE=$(curl -sL -A "Mozilla/5.0" "$URL")
+            REAL=$(printf '%s' "$PAGE" | grep -oE 'https://download[0-9]*\.mediafire\.com/[^"]+' | head -1)
+            if [ -z "$REAL" ]; then
+              REAL=$(printf '%s' "$PAGE" | grep -oE 'href="[^"]*mediafire[^"]*"' | head -1 | sed 's/href="//;s/"$//')
+            fi
+            if [ -z "$REAL" ]; then echo "::error::MediaFire: não achei o link de download (arquivo removido ou link de pasta?)."; exit 1; fi
+            echo "Download direto: $REAL"
+            curl -L --retry 3 --max-time 900 -A "Mozilla/5.0" -o source.bin "$REAL"
+          else
+            curl -L --retry 3 --max-time 900 -o source.bin "$URL"
+          fi
+
+          echo "--- arquivo baixado ---"
+          ls -lh source.bin
+          file source.bin || true
+          TAM=$(stat -c%s source.bin 2>/dev/null || echo 0)
+          if [ "$TAM" -lt 200 ]; then echo "::error::Download muito pequeno (${TAM} bytes). Link inválido ou privado."; head -c 300 source.bin; exit 1; fi
+          if head -c 400 source.bin | grep -qi '<html\|<!DOCTYPE'; then
+            echo "::error::O link devolveu uma página HTML, não o arquivo. Use link direto de download."
+            head -c 300 source.bin; exit 1
+          fi
+
+          echo "--- extraindo ---"
+          EXTRAIU=0
+          if 7z l source.bin >/dev/null 2>&1; then
+            if [ -n "$PW" ]; then
+              7z x -y -p"$PW" source.bin -o. >/dev/null 2>&1 && EXTRAIU=1 || EXTRAIU=0
+            else
+              7z x -y source.bin -o. >/dev/null 2>&1 && EXTRAIU=1 || EXTRAIU=0
+            fi
+            if [ "$EXTRAIU" = "0" ] && [ -n "$PW" ]; then
+              7z x -y source.bin -o. >/dev/null 2>&1 && EXTRAIU=1
+            fi
+          elif tar -tf source.bin >/dev/null 2>&1; then
+            tar -xf source.bin && EXTRAIU=1
+          fi
+          if [ "$EXTRAIU" = "0" ]; then
+            echo "::error::Não consegui extrair. Formato não suportado ou senha incorreta."
+            file source.bin; exit 1
+          fi
+
+          echo "--- conteudo extraido ---"
+          find . -maxdepth 3 -not -path '*/\.git/*' | head -50
+          if [ -z "$(find . -name build.gradle -o -name 'build.gradle.kts' -o -name settings.gradle | head -1)" ]; then
+            echo "::error::Extraiu, mas não achei build.gradle/settings.gradle (isso não parece um projeto Android)."
+            exit 1
+          fi
+
+      - name: Verificação
         id: proj
         run: |
           FILE=$(find /tmp/src -name "settings.gradle*" | head -1)
-          if [ -z "$FILE" ]; then
-            FILE=$(find /tmp/src -name "build.gradle*" | head -1)
-          fi
-          if [ -z "$FILE" ]; then echo "::error::build.gradle/settings.gradle nao encontrado dentro do arquivo"; exit 1; fi
+          [ -z "$FILE" ] && FILE=$(find /tmp/src -name "build.gradle*" | head -1)
+          if [ -z "$FILE" ]; then echo "::error::build.gradle não encontrado."; exit 1; fi
           DIR=$(dirname "$FILE")
           echo "dir=$DIR" >> $GITHUB_OUTPUT
           echo "Projeto: $DIR"
-          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$DIR" | head -20
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}"
 
       - uses: actions/setup-java@v4
         with:
@@ -56,13 +102,13 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v3
 
-      - name: Compilar APK debug
+      - name: APK debug
         working-directory: ${{ steps.proj.outputs.dir }}
         run: |
           chmod +x ./gradlew 2>/dev/null || true
           if [ -f ./gradlew ]; then ./gradlew assembleDebug --no-daemon --stacktrace; else gradle assembleDebug --no-daemon --stacktrace; fi
 
-      - name: Publicar APK
+      - name: Entregar APK
         uses: actions/upload-artifact@v4
         with:
           name: apk-debug
