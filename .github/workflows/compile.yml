@@ -1,0 +1,71 @@
+name: compilar-apk
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: 'Link do projeto (.zip / .rar)'
+        required: true
+      password:
+        description: 'Senha do arquivo (opcional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Baixar e extrair source
+        run: |
+          mkdir -p /tmp/src && cd /tmp/src
+          curl -L --retry 3 --max-time 300 -o source.bin "${{ inputs.source_url }}"
+          ls -lh source.bin
+          PW="${{ inputs.password }}"
+          if [ -n "$PW" ]; then
+            unzip -P "$PW" -o source.bin -d . >/dev/null 2>&1 \
+              || 7z x -p"$PW" -y source.bin >/dev/null \
+              || { echo "::error::Falha ao extrair (senha incorreta?)"; exit 1; }
+          else
+            unzip -o source.bin -d . >/dev/null 2>&1 \
+              || 7z x -y source.bin >/dev/null \
+              || tar -xf source.bin
+          fi
+          echo "--- conteudo ---"; ls -la
+
+      - name: Localizar projeto Android
+        id: proj
+        run: |
+          FILE=$(find /tmp/src -name "settings.gradle*" | head -1)
+          if [ -z "$FILE" ]; then
+            FILE=$(find /tmp/src -name "build.gradle*" | head -1)
+          fi
+          if [ -z "$FILE" ]; then echo "::error::build.gradle/settings.gradle nao encontrado dentro do arquivo"; exit 1; fi
+          DIR=$(dirname "$FILE")
+          echo "dir=$DIR" >> $GITHUB_OUTPUT
+          echo "Projeto: $DIR"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: Compilar APK debug
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          chmod +x ./gradlew 2>/dev/null || true
+          if [ -f ./gradlew ]; then ./gradlew assembleDebug --no-daemon --stacktrace; else gradle assembleDebug --no-daemon --stacktrace; fi
+
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: ${{ steps.proj.outputs.dir }}/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
