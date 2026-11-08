@@ -12,7 +12,7 @@ on:
         default: ''
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -115,17 +115,3 @@ jobs:
           path: ${{ steps.proj.outputs.dir }}/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 3
-
-      - name: Gerar link de download (3 dias)
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          APK=$(find ${{ steps.proj.outputs.dir }} -name '*.apk' | head -1)
-          if [ -z "$APK" ]; then echo "::error::APK não encontrado para publicar"; exit 1; fi
-          TAG="apk-$(date -u +%Y%m%d-%H%M%S)"
-          gh release create "$TAG" "$APK#app-debug.apk" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "APK debug $TAG" \
-            --notes "Gerado pelo bot Bravuz Network. Link expira em 3 dias." || exit 1
-          echo "Link publicado: $TAG"
